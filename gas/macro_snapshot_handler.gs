@@ -30,8 +30,7 @@ function doPost(e) {
   if (endpoint === 'earnings_report') return handleEarningsReport(e);
   if (endpoint === 'read_watchlist')  return handleReadWatchlist(e);
 
-  // ↓ 這裡接你既有的 Telegram update 處理（v5 bot 那 1003 行的 entry）
-  return handleTelegramUpdate(e);
+  return jsonResp({ error: 'unknown_endpoint', endpoint: endpoint || null });
 }
 
 
