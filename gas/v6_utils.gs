@@ -248,37 +248,65 @@ function syncPortfolioToMemory() {
   }
 
   const rows = watchlist.getRange(2, 1, watchlist.getLastRow() - 1, watchlist.getLastColumn()).getValues();
-  const tradeable = {};   // note → ['ticker shares', ...]
-  const locked = {};
-  const exited = [];
+  const byMarket = { US: [], HK: [], TW: [], OTHER: [] };
+  const lockedByMarket = { US: [], HK: [], TW: [], OTHER: [] };
+  const recentExits = [];   // 過去 180 天
+  let olderExitCount = 0;
+  const tz = 'Asia/Taipei';
+  const now = Date.now();
+  const cutoffMs = 180 * 24 * 3600 * 1000;
 
   rows.forEach(r => {
     const ticker = String(r[idx.ticker] || '').trim();
     if (!ticker) return;
     const shares = Number(r[idx.shares] || 0);
-    const note = String(r[idx.note] || '其他').trim();
-    const exitAt = String(r[idx.exit_at] || '').trim();
+    const market = String(r[idx.market] || '').toUpperCase().trim();
+    const note = String(r[idx.note] || '').trim();
+    const exitRaw = r[idx.exit_at];
     const lockStatus = String(r[idx.lock_status] || '').trim();
 
-    if (shares === 0 || exitAt) {
-      exited.push(exitAt ? `${ticker}(${exitAt})` : ticker);
+    const marketKey = (market === 'US' || market === 'HK' || market === 'TW') ? market : 'OTHER';
+
+    // shares === 0 才算 exited（保守，不靠 exit_at）
+    if (shares === 0) {
+      let exitDate = '';
+      if (exitRaw instanceof Date && !isNaN(exitRaw.getTime())) {
+        exitDate = Utilities.formatDate(exitRaw, tz, 'yyyy-MM-dd');
+        const ageMs = now - exitRaw.getTime();
+        if (ageMs > cutoffMs) { olderExitCount++; return; }
+      } else if (exitRaw) {
+        exitDate = String(exitRaw).substring(0, 10);
+      }
+      recentExits.push(exitDate ? `${ticker}(${exitDate})` : ticker);
       return;
     }
-    const target = (lockStatus === 'locked') ? locked : tradeable;
-    if (!target[note]) target[note] = [];
-    target[note].push(`${ticker} ${shares}`);
+
+    // 有持股 → tradeable / locked，以 note 當 inline annotation
+    const tag = note ? ` ${ticker} ${shares}（${note}）` : ` ${ticker} ${shares}`;
+    const entry = `${ticker} ${shares}${note ? `（${note}）` : ''}`;
+    const target = (lockStatus === 'locked') ? lockedByMarket : byMarket;
+    target[marketKey].push(entry);
   });
 
   const lines = [];
-  Object.keys(tradeable).forEach(note => {
-    lines.push(`[${note}] ${tradeable[note].join(' / ')}`);
+  const marketLabel = { US: '美股', HK: '港股', TW: '台股', OTHER: '其他' };
+  ['US', 'HK', 'TW', 'OTHER'].forEach(m => {
+    if (byMarket[m].length > 0) {
+      lines.push(`[${marketLabel[m]}] ${byMarket[m].join(' / ')}`);
+    }
   });
-  Object.keys(locked).forEach(note => {
-    lines.push(`[${note} / 鎖倉不能動] ${locked[note].join(' / ')}`);
+  ['US', 'HK', 'TW', 'OTHER'].forEach(m => {
+    if (lockedByMarket[m].length > 0) {
+      lines.push(`[${marketLabel[m]} / 鎖倉不能動] ${lockedByMarket[m].join(' / ')}`);
+    }
   });
-  if (exited.length > 0) lines.push(`[已出清] ${exited.join(', ')}`);
+  if (recentExits.length > 0) {
+    lines.push(`[近 180 天已出清] ${recentExits.join(', ')}` +
+               (olderExitCount > 0 ? ` (+${olderExitCount} 更早)` : ''));
+  } else if (olderExitCount > 0) {
+    lines.push(`[歷史已出清] ${olderExitCount} 筆（>180 天前）`);
+  }
 
-  const tz = 'Asia/Taipei';
   const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
   const content = `Portfolio（自動同步自 earnings_watchlist @ ${stamp}）：\n` + lines.join('\n');
 
@@ -295,7 +323,9 @@ function syncPortfolioToMemory() {
 
   memory.getRange(targetRow, 2).setValue(content);
   memory.getRange(targetRow, 3).setValue(stamp);
-  console.log(`✅ Memory #3 已更新：${Object.keys(tradeable).length} tradeable group / ${Object.keys(locked).length} locked / ${exited.length} exited`);
+  const counts = ['US', 'HK', 'TW', 'OTHER'].map(m => byMarket[m].length).reduce((a,b)=>a+b, 0);
+  const lockedCount = ['US', 'HK', 'TW', 'OTHER'].map(m => lockedByMarket[m].length).reduce((a,b)=>a+b, 0);
+  console.log(`✅ Memory #3 已更新：${counts} 持倉 / ${lockedCount} 鎖倉 / ${recentExits.length} 近期出清 / ${olderExitCount} 歷史出清`);
 }
 
 
