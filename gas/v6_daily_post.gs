@@ -358,6 +358,10 @@ function dailyPostUrgent(triggerEvent) {
       return;
     }
 
+    // 自動同步持倉
+    try { syncPortfolioToMemory(); }
+    catch (e) { console.warn(`[v6 urgent] portfolio sync failed: ${e.message}`); }
+
     const marketData = fetchMarketData();
     const systemPrompt = buildDynamicSystemPrompt();
     const userPrompt = buildUrgentPrompt(triggerEvent, marketData);
@@ -408,6 +412,10 @@ function _runDailyPost(mode, promptBuilder, claudeMode) {
       logDailyPost({ mode: mode, status: 'quota_exceeded' });
       return;
     }
+
+    // 自動把 earnings_watchlist 同步到 Memory #3（非致命：失敗繼續跑）
+    try { syncPortfolioToMemory(); }
+    catch (e) { console.warn(`[v6 ${mode}] portfolio sync failed: ${e.message}`); }
 
     const marketData = fetchMarketData();
     const systemPrompt = buildDynamicSystemPrompt();
@@ -563,4 +571,7 @@ function v6TestSystemPrompt() {
 }
 function v6TestQuota() {
   console.log(JSON.stringify(checkDailyQuota()));
+}
+function v6TestSyncPortfolio() {
+  syncPortfolioToMemory();
 }

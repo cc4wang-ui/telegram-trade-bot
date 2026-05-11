@@ -212,6 +212,94 @@ function estimatePortfolioChange(marketData) {
 
 
 // ============================================================
+// Portfolio 自動同步：earnings_watchlist → memory #3
+// ============================================================
+/**
+ * 從 v5 earnings_watchlist sheet 讀持倉，自動 format 寫到 memory #3 B 欄。
+ * 上游：v5 syncFromSnowball() 把 Snowball Drive 匯出 → earnings_watchlist。
+ * 下游：dailyPostMorning/Evening/Urgent 開頭自動呼叫此函式 → daily post 永遠拿最新持倉。
+ *
+ * 容錯：任何 sheet / header 異常 → 印 warning 後 return（不丟錯，不打斷 daily post）。
+ */
+function syncPortfolioToMemory() {
+  const ss = _openV6Sheet();
+  if (!ss) { console.warn('[sync] MACRO_SHEET_ID not set'); return; }
+
+  const watchlist = ss.getSheetByName('earnings_watchlist');
+  if (!watchlist || watchlist.getLastRow() < 2) {
+    console.warn('[sync] earnings_watchlist 不存在或無資料，略過');
+    return;
+  }
+  const memory = ss.getSheetByName('memory');
+  if (!memory) { console.warn('[sync] memory sheet 不存在'); return; }
+
+  const headers = watchlist.getRange(1, 1, 1, watchlist.getLastColumn()).getValues()[0];
+  const idx = {
+    ticker: headers.indexOf('ticker'),
+    shares: headers.indexOf('shares'),
+    market: headers.indexOf('market'),
+    exit_at: headers.indexOf('exit_at'),
+    lock_status: headers.indexOf('lock_status'),
+    note: headers.indexOf('note')
+  };
+  if (idx.ticker < 0 || idx.shares < 0 || idx.note < 0) {
+    console.warn('[sync] earnings_watchlist header 不符 v1.2 schema，請先跑 migrateWatchlistSchema()');
+    return;
+  }
+
+  const rows = watchlist.getRange(2, 1, watchlist.getLastRow() - 1, watchlist.getLastColumn()).getValues();
+  const tradeable = {};   // note → ['ticker shares', ...]
+  const locked = {};
+  const exited = [];
+
+  rows.forEach(r => {
+    const ticker = String(r[idx.ticker] || '').trim();
+    if (!ticker) return;
+    const shares = Number(r[idx.shares] || 0);
+    const note = String(r[idx.note] || '其他').trim();
+    const exitAt = String(r[idx.exit_at] || '').trim();
+    const lockStatus = String(r[idx.lock_status] || '').trim();
+
+    if (shares === 0 || exitAt) {
+      exited.push(exitAt ? `${ticker}(${exitAt})` : ticker);
+      return;
+    }
+    const target = (lockStatus === 'locked') ? locked : tradeable;
+    if (!target[note]) target[note] = [];
+    target[note].push(`${ticker} ${shares}`);
+  });
+
+  const lines = [];
+  Object.keys(tradeable).forEach(note => {
+    lines.push(`[${note}] ${tradeable[note].join(' / ')}`);
+  });
+  Object.keys(locked).forEach(note => {
+    lines.push(`[${note} / 鎖倉不能動] ${locked[note].join(' / ')}`);
+  });
+  if (exited.length > 0) lines.push(`[已出清] ${exited.join(', ')}`);
+
+  const tz = 'Asia/Taipei';
+  const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
+  const content = `Portfolio（自動同步自 earnings_watchlist @ ${stamp}）：\n` + lines.join('\n');
+
+  // 找 Memory #3 列
+  const memData = memory.getRange(2, 1, memory.getLastRow() - 1, 4).getValues();
+  let targetRow = -1;
+  for (let i = 0; i < memData.length; i++) {
+    if (Number(memData[i][0]) === 3) { targetRow = i + 2; break; }
+  }
+  if (targetRow < 0) {
+    console.warn('[sync] Memory #3 列不存在於 memory sheet');
+    return;
+  }
+
+  memory.getRange(targetRow, 2).setValue(content);
+  memory.getRange(targetRow, 3).setValue(stamp);
+  console.log(`✅ Memory #3 已更新：${Object.keys(tradeable).length} tradeable group / ${Object.keys(locked).length} locked / ${exited.length} exited`);
+}
+
+
+// ============================================================
 // Claude API cost calculator
 // ============================================================
 /**
