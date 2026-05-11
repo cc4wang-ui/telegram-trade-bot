@@ -55,7 +55,8 @@ function setupV6Check() {
     events: ['date', 'time', 'event', 'importance', 'note'],
     last_market_data: ['fetched_at', 'spx', 'nasdaq', 'vix', 'wti', 'ten_year',
                        'dxy', 'kre', 'tips_be', 'five_y_five_y', 'taiex',
-                       'hy_spread', 'txf1']
+                       'hy_spread', 'txf1'],
+    portfolio_live: ['ticker', 'market', 'shares', 'lock_status', 'note']
   };
   Object.keys(sheets).forEach(name => {
     let sh = ss.getSheetByName(name);
@@ -70,9 +71,64 @@ function setupV6Check() {
 
   console.log('\n下一步：');
   console.log('  1. initV6MemorySheet() 預填 18 條 memory（Cross 自行補內容）');
-  console.log('  2. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
-  console.log('  3. v6TestMorning() 手動跑一次 morning post');
-  console.log('  4. setupV6Triggers() 上線 cron');
+  console.log('  2. initV6PortfolioLive() 預填當前持倉（Cross 自行確認）');
+  console.log('  3. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
+  console.log('  4. v6TestMorning() 手動跑一次 morning post');
+  console.log('  5. setupV6Triggers() 上線 cron');
+}
+
+
+// ============================================================
+// initV6PortfolioLive — 預填當前持倉（Cross 在 sheet 編輯）
+// ============================================================
+/**
+ * 預填 16 列當前持倉到 portfolio_live sheet（從 spec + Cross 確認的真實資料）。
+ * Cross 之後在 sheet 直接編輯這幾列，賣就改 shares=0、新買新增列。
+ * v6 syncPortfolioToMemory() 會讀此 sheet 自動寫到 Memory #3。
+ */
+function initV6PortfolioLive() {
+  const ss = _openV6Sheet();
+  if (!ss) throw new Error('MACRO_SHEET_ID not set');
+  const sh = ss.getSheetByName('portfolio_live');
+  if (!sh) throw new Error('portfolio_live sheet 不存在 → 先跑 setupV6Check()');
+
+  if (sh.getLastRow() >= 2) {
+    console.log(`ℹ portfolio_live 已有 ${sh.getLastRow() - 1} 列資料 → 略過初始化`);
+    return;
+  }
+
+  // 欄位: ticker | market | shares | lock_status | note
+  const seed = [
+    // 自由 Firstrade（個人美股 91275762）
+    ['NVDA',   'US',    15, 'tradeable', 'Firstrade'],
+    ['NFLX',   'US',    50, 'tradeable', 'Firstrade / 5/3 賣 50 剩 50'],
+    ['QQQ',    'US',    10, 'tradeable', 'Firstrade'],
+    ['VTI',    'US',    10, 'tradeable', 'Firstrade'],
+    ['INTC',   'US',    25, 'tradeable', 'Firstrade / 新建倉'],
+    // 元大美股
+    ['VOO',    'US',    18, 'tradeable', '元大美股'],
+    ['IXC',    'US',    60, 'tradeable', '元大美股 / 能源對沖'],
+    // 元大港股
+    ['9660',   'HK', 16800, 'tradeable', '元大港股 / 地平線機器人'],
+    // 元大台股
+    ['2330',   'TW',  1018, 'tradeable', '元大台股 / 台積電'],
+    ['006208', 'TW',    34, 'tradeable', '元大台股 / 富邦台 50 零頭'],
+    ['00632R', 'TW', 15000, 'tradeable', '元大台股 / 反一對沖'],
+    // 信託（鎖倉不能動）
+    ['2330',   'TW',   910, 'locked',    '信託 / 台積電'],
+    ['006208', 'TW',  3500, 'locked',    '信託 / 富邦台 50'],
+    ['QQQ',    'US',    28, 'locked',    '信託'],
+    ['2382',   'TW',  2188, 'locked',    '信託 / 廣達'],
+    ['00956',  'TW',  4308, 'locked',    '信託 / CTBC TOPIX']
+  ];
+  seed.forEach(row => sh.appendRow(row));
+  console.log(`✅ 預填 ${seed.length} 列 portfolio_live`);
+  console.log('  Cross 請至 sheet 確認數字是否正確：');
+  console.log('  - NFLX 50（5/3 後剩餘）');
+  console.log('  - 00632R 15000（反一對沖仍持有）');
+  console.log('  - INTC 25（新建倉日期請確認）');
+  console.log('  - QQQ 拆 10 自由 + 28 信託');
+  console.log('  - 2330 拆 1018 自由 + 910 信託');
 }
 
 

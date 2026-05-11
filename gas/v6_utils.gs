@@ -215,8 +215,9 @@ function estimatePortfolioChange(marketData) {
 // Portfolio 自動同步：earnings_watchlist → memory #3
 // ============================================================
 /**
- * 從 v5 earnings_watchlist sheet 讀持倉，自動 format 寫到 memory #3 B 欄。
- * 上游：v5 syncFromSnowball() 把 Snowball Drive 匯出 → earnings_watchlist。
+ * 從 portfolio_live sheet 讀持倉，自動 format 寫到 memory #3 B 欄。
+ * 上游：Cross 手動維護 portfolio_live（5 欄：ticker/market/shares/lock_status/note）。
+ *       earnings_watchlist 是 Snowball transaction 聚合，含歷史殘餘，不適合當持倉源。
  * 下游：dailyPostMorning/Evening/Urgent 開頭自動呼叫此函式 → daily post 永遠拿最新持倉。
  *
  * 容錯：任何 sheet / header 異常 → 印 warning 後 return（不丟錯，不打斷 daily post）。
@@ -225,64 +226,42 @@ function syncPortfolioToMemory() {
   const ss = _openV6Sheet();
   if (!ss) { console.warn('[sync] MACRO_SHEET_ID not set'); return; }
 
-  const watchlist = ss.getSheetByName('earnings_watchlist');
-  if (!watchlist || watchlist.getLastRow() < 2) {
-    console.warn('[sync] earnings_watchlist 不存在或無資料，略過');
+  const portfolio = ss.getSheetByName('portfolio_live');
+  if (!portfolio || portfolio.getLastRow() < 2) {
+    console.warn('[sync] portfolio_live 不存在或無資料，略過（請先跑 setupV6Check + initV6PortfolioLive）');
     return;
   }
   const memory = ss.getSheetByName('memory');
   if (!memory) { console.warn('[sync] memory sheet 不存在'); return; }
 
-  const headers = watchlist.getRange(1, 1, 1, watchlist.getLastColumn()).getValues()[0];
+  const headers = portfolio.getRange(1, 1, 1, portfolio.getLastColumn()).getValues()[0];
   const idx = {
     ticker: headers.indexOf('ticker'),
     shares: headers.indexOf('shares'),
     market: headers.indexOf('market'),
-    exit_at: headers.indexOf('exit_at'),
     lock_status: headers.indexOf('lock_status'),
     note: headers.indexOf('note')
   };
-  if (idx.ticker < 0 || idx.shares < 0 || idx.note < 0) {
-    console.warn('[sync] earnings_watchlist header 不符 v1.2 schema，請先跑 migrateWatchlistSchema()');
+  if (idx.ticker < 0 || idx.shares < 0 || idx.market < 0) {
+    console.warn('[sync] portfolio_live header 不符（需有 ticker/market/shares）');
     return;
   }
 
-  const rows = watchlist.getRange(2, 1, watchlist.getLastRow() - 1, watchlist.getLastColumn()).getValues();
+  const rows = portfolio.getRange(2, 1, portfolio.getLastRow() - 1, portfolio.getLastColumn()).getValues();
   const byMarket = { US: [], HK: [], TW: [], OTHER: [] };
   const lockedByMarket = { US: [], HK: [], TW: [], OTHER: [] };
-  const recentExits = [];   // 過去 180 天
-  let olderExitCount = 0;
-  const tz = 'Asia/Taipei';
-  const now = Date.now();
-  const cutoffMs = 180 * 24 * 3600 * 1000;
+  let skipped = 0;
 
   rows.forEach(r => {
     const ticker = String(r[idx.ticker] || '').trim();
     if (!ticker) return;
     const shares = Number(r[idx.shares] || 0);
+    if (shares <= 0) { skipped++; return; }   // 已出清，不寫進 Memory #3
     const market = String(r[idx.market] || '').toUpperCase().trim();
-    const note = String(r[idx.note] || '').trim();
-    const exitRaw = r[idx.exit_at];
-    const lockStatus = String(r[idx.lock_status] || '').trim();
+    const note = (idx.note >= 0) ? String(r[idx.note] || '').trim() : '';
+    const lockStatus = (idx.lock_status >= 0) ? String(r[idx.lock_status] || '').trim() : '';
 
     const marketKey = (market === 'US' || market === 'HK' || market === 'TW') ? market : 'OTHER';
-
-    // shares === 0 才算 exited（保守，不靠 exit_at）
-    if (shares === 0) {
-      let exitDate = '';
-      if (exitRaw instanceof Date && !isNaN(exitRaw.getTime())) {
-        exitDate = Utilities.formatDate(exitRaw, tz, 'yyyy-MM-dd');
-        const ageMs = now - exitRaw.getTime();
-        if (ageMs > cutoffMs) { olderExitCount++; return; }
-      } else if (exitRaw) {
-        exitDate = String(exitRaw).substring(0, 10);
-      }
-      recentExits.push(exitDate ? `${ticker}(${exitDate})` : ticker);
-      return;
-    }
-
-    // 有持股 → tradeable / locked，以 note 當 inline annotation
-    const tag = note ? ` ${ticker} ${shares}（${note}）` : ` ${ticker} ${shares}`;
     const entry = `${ticker} ${shares}${note ? `（${note}）` : ''}`;
     const target = (lockStatus === 'locked') ? lockedByMarket : byMarket;
     target[marketKey].push(entry);
@@ -300,15 +279,10 @@ function syncPortfolioToMemory() {
       lines.push(`[${marketLabel[m]} / 鎖倉不能動] ${lockedByMarket[m].join(' / ')}`);
     }
   });
-  if (recentExits.length > 0) {
-    lines.push(`[近 180 天已出清] ${recentExits.join(', ')}` +
-               (olderExitCount > 0 ? ` (+${olderExitCount} 更早)` : ''));
-  } else if (olderExitCount > 0) {
-    lines.push(`[歷史已出清] ${olderExitCount} 筆（>180 天前）`);
-  }
 
+  const tz = 'Asia/Taipei';
   const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
-  const content = `Portfolio（自動同步自 earnings_watchlist @ ${stamp}）：\n` + lines.join('\n');
+  const content = `Portfolio（自動同步自 portfolio_live @ ${stamp}）：\n` + lines.join('\n');
 
   // 找 Memory #3 列
   const memData = memory.getRange(2, 1, memory.getLastRow() - 1, 4).getValues();
@@ -323,9 +297,9 @@ function syncPortfolioToMemory() {
 
   memory.getRange(targetRow, 2).setValue(content);
   memory.getRange(targetRow, 3).setValue(stamp);
-  const counts = ['US', 'HK', 'TW', 'OTHER'].map(m => byMarket[m].length).reduce((a,b)=>a+b, 0);
-  const lockedCount = ['US', 'HK', 'TW', 'OTHER'].map(m => lockedByMarket[m].length).reduce((a,b)=>a+b, 0);
-  console.log(`✅ Memory #3 已更新：${counts} 持倉 / ${lockedCount} 鎖倉 / ${recentExits.length} 近期出清 / ${olderExitCount} 歷史出清`);
+  const total = ['US', 'HK', 'TW', 'OTHER'].map(m => byMarket[m].length).reduce((a,b)=>a+b, 0);
+  const lockedTotal = ['US', 'HK', 'TW', 'OTHER'].map(m => lockedByMarket[m].length).reduce((a,b)=>a+b, 0);
+  console.log(`✅ Memory #3 已更新：${total} 持倉 / ${lockedTotal} 鎖倉 / ${skipped} 列略過（shares=0）`);
 }
 
 
