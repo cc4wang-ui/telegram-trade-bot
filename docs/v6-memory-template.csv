@@ -1,0 +1,19 @@
+memory_num,content,updated_at,enabled
+1,"台股價格驗證鐵則（訓練資料落後 6-12 月，必先 web_search）",2026-05-11,TRUE
+2,"財務分析順序（搜即時價→搜財報→算 PE→跑五條件→建表）",2026-05-11,TRUE
+3,"Portfolio 5/3 三筆出清後：自由 Firstrade NVDA 15、NFLX 50 剩、QQQ 10、VTI 10；元大美股 VOO 18、IXC 60（能源對沖）；元大港股 9660.HK 16800（1810 已全出清）；元大台股 2330 1018、006208 34、00632R 14067（反一對沖）；信託（不能動）2330 ~910、006208 ~3500、QQQ ~28、2382 全、00956 全。可動現金 NT$153 萬。",2026-05-11,TRUE
+4,"Pine 陷阱清單（v10 訊號注意項，詳見 Auto-trade repo automation/）",2026-05-11,TRUE
+5,"自動化交易計畫（IB 入金中，5/16 後啟用）",2026-05-11,TRUE
+6,"Project Knowledge 索引：cpi-2026-05-12-sop.md / hedge-decision-tree.md / playbook-2026-05.md / uncontrollable-monitor.md / warsh-failure-analysis.md / private-credit-watch.md / earnings-tracking.md",2026-05-11,TRUE
+7,"Telegram Bot v5 已上線 2026/4/14（API key 不 rotate 已接受）",2026-05-11,TRUE
+8,"1810 D+ 全程已完成 -NT$207K（沉沒成本陷阱，不主動建議追）",2026-05-11,TRUE
+9,"TradingView Essential 限制（alert 條數、watchlist 上限）",2026-05-11,TRUE
+10,"5/15 規則：5/15 前不加倉（除 NFP 大 miss 例外，NT$80K 上限）；NT$80 萬 TWD 現金底線；補位已執行完畢",2026-05-11,TRUE
+11,"量子投資計畫 5/16+ 啟動（Phase 1 預算 NT$50-67 萬）",2026-05-11,TRUE
+12,"日期錨定鐵則：當前 = 2026-05-11，提到日期必先確認，不要憑訓練資料推斷",2026-05-11,TRUE
+13,"4/29 市場讀數（基準線，比較今日變化用）",2026-05-11,TRUE
+14,"財報追蹤規則（含 PLTR、NFLX、NVDA、2330、9660）",2026-05-11,TRUE
+15,"v10 期貨做空訊號（5/12 CPI 是最大 trigger）",2026-05-11,TRUE
+16,"Warsh 12 不可控變數監控（Tier 1-5 燈號架構）",2026-05-11,TRUE
+17,"portfolio/做多/加倉強制檢查：任何加倉前先確認可動現金 + 5/15 規則狀態 + Tier 1/Tier 2 燈號",2026-05-11,TRUE
+18,"主動 Alert 規則：Tier 1/Tier 2 觸發 → 開頭 🔴🔴 立即寫；不等使用者問",2026-05-11,TRUE
