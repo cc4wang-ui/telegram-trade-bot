@@ -247,10 +247,11 @@ function callClaudeAPI(systemPrompt, userPrompt, mode) {
   };
 
   // 全部 mode 都啟用 web_search（依 Cross 5/11 決策）
+  // max_uses 限制：web_search round-trip 會把 prompt 重餵 → 控制 input token 爆量
   payload.tools = [{
     type: 'web_search_20250305',
     name: 'web_search',
-    max_uses: (mode === 'urgent') ? 3 : 5
+    max_uses: 2
   }];
 
   return _callClaudeWithRetry({
