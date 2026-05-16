@@ -328,7 +328,8 @@ function parseSnowballSnapshot(text) {
   }
   if (rows.length < 2) return { holdings: [], error: 'csv empty' };
 
-  const header = rows[0].map(h => String(h).trim());
+  // 剝 BOM（U+FEFF，Excel / web export CSV 常見）+ trim
+  const header = rows[0].map(h => String(h).replace(/^﻿/, '').trim());
   const cTicker = header.indexOf('Holding');
   const cShares = header.indexOf('Shares');
   const cCurrency = header.indexOf('Currency');
@@ -338,6 +339,7 @@ function parseSnowballSnapshot(text) {
     if (cTicker < 0) missing.push('Holding');
     if (cShares < 0) missing.push('Shares');
     if (cCurrency < 0) missing.push('Currency');
+    console.warn('[parseSnowball] 實際看到的 headers: ' + JSON.stringify(header.slice(0, 10)));
     return { holdings: [], error: `csv missing cols: ${missing.join(',')}` };
   }
 
@@ -504,17 +506,30 @@ function syncPortfolioLiveFromSnowball(opts) {
     return row;
   });
 
-  // 6. log preview / write
+  // 6. 找出原 portfolio_live 有、但 snapshot 沒的 ticker（會被 wipe）
+  const inSnapshot = {};
+  holdings.forEach(h => { inSnapshot[normalizeTicker(h.symbol)] = true; });
+  const wipedTickers = Object.keys(preserve).filter(k => !inSnapshot[k]);
+
+  // 7. log preview / write
   newRows.forEach((r, i) => {
     const h = holdings[i];
     const lockStr = (lIdx.lock_status >= 0) ? ` [${r[lIdx.lock_status]}]` : '';
     console.log(`  ${h.symbol} ${h.shares} ${h.currency}${lockStr}`);
   });
   console.log(`${tag} 共 ${newRows.length} 列；保留 lock/note: ${result.preserved}`);
+  const existingRows = Math.max(0, sh.getLastRow() - 1);
+  if (existingRows > 0) {
+    console.log(`${tag} 將清掉 portfolio_live 原 ${existingRows} 列、重寫 ${newRows.length} 列`);
+  }
+  if (wipedTickers.length > 0) {
+    console.warn(`${tag} ⚠ snapshot 無、被清掉的 ticker: ${wipedTickers.join(', ')}（如為真實持倉請手動加列）`);
+    result.warnings.push(`wiped tickers not in snapshot: ${wipedTickers.join(', ')}`);
+  }
 
   if (dryRun) return result;
 
-  // 7. 清空舊資料列、寫入新列
+  // 8. 清空舊資料列、寫入新列
   if (sh.getLastRow() >= 2) {
     sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
   }
