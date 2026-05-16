@@ -317,6 +317,9 @@ function syncPortfolioToMemory() {
  *   holdings: [{symbol, currency, shares, avgCost}]
  */
 function parseSnowballSnapshot(text) {
+  // 剝 raw text 開頭的 BOM（U+FEFF），否則 parseCsv 看到 BOM 不認 cell 0 是 quoted
+  if (text && text.charCodeAt(0) === 0xFEFF) text = text.substring(1);
+
   let rows;
   try {
     rows = Utilities.parseCsv(text);
@@ -328,8 +331,9 @@ function parseSnowballSnapshot(text) {
   }
   if (rows.length < 2) return { holdings: [], error: 'csv empty' };
 
-  // 剝 BOM（U+FEFF，Excel / web export CSV 常見）+ trim
-  const header = rows[0].map(h => String(h).replace(/^﻿/, '').trim());
+  // 雙保險：每個 cell 再剝 BOM + 外層引號 + trim
+  const cleanCell = s => String(s).replace(/^﻿/, '').replace(/^"(.*)"$/, '$1').trim();
+  const header = rows[0].map(cleanCell);
   const cTicker = header.indexOf('Holding');
   const cShares = header.indexOf('Shares');
   const cCurrency = header.indexOf('Currency');
