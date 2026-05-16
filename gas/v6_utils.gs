@@ -474,6 +474,11 @@ function syncPortfolioLiveFromSnowball(opts) {
     }
 
     if (entry.tradeableRows.length === 0) {
+      // 全部 locked / CSV total 剛好 = locked sum → 不需要 tradeable 列
+      if (target === 0) {
+        diffs.push(`= ${h.symbol} all in locked (CSV ${h.shares} = locked ${entry.lockedSum})，無 tradeable 變化`);
+        return;
+      }
       // append new tradeable row
       const market = currencyToMarket(h.currency);
       const newRow = new Array(liveHdr.length).fill('');
