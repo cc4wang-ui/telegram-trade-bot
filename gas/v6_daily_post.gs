@@ -575,3 +575,11 @@ function v6TestQuota() {
 function v6TestSyncPortfolio() {
   syncPortfolioToMemory();
 }
+function v6TestSyncSnowball() {
+  const r = syncPortfolioLiveFromSnowball();
+  console.log(JSON.stringify(r));
+}
+function v6DryRunSnowball() {
+  const r = syncPortfolioLiveFromSnowball({ dryRun: true });
+  console.log(JSON.stringify(r));
+}

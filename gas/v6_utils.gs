@@ -304,6 +304,221 @@ function syncPortfolioToMemory() {
 
 
 // ============================================================
+// Snowball CSV → portfolio_live（tradeable 列）
+// ============================================================
+/**
+ * 讀 Drive 內最新 Snowball CSV，更新 portfolio_live tradeable 列。
+ * Locked 列由 Cross 手動維護，sync 永不動。
+ * tradeable = CSV_net_total − Σ(locked rows shares)（CSV 含信託加總）
+ *
+ * Reuse v5 helpers: normalizeTicker / currencyToMarket（macro_snapshot_handler.gs）
+ *
+ * @param {{dryRun?: boolean}} opts dryRun=true 只 log 不寫 sheet
+ * @returns {{updated: number, added: number, skipped: number, warnings: string[]}}
+ */
+function syncPortfolioLiveFromSnowball(opts) {
+  const dryRun = !!(opts && opts.dryRun);
+  const tag = dryRun ? '[snowball-dry]' : '[snowball-sync]';
+  const result = { updated: 0, added: 0, skipped: 0, warnings: [] };
+
+  const props = PropertiesService.getScriptProperties();
+  const folderId = props.getProperty('SNOWBALL_FOLDER_ID');
+  if (!folderId) {
+    console.warn(`${tag} SNOWBALL_FOLDER_ID 未設定，略過`);
+    result.warnings.push('SNOWBALL_FOLDER_ID not set');
+    return result;
+  }
+
+  // 1. 找 folder 最新 CSV（沿用 v5 邏輯）
+  let folder;
+  try { folder = DriveApp.getFolderById(folderId); }
+  catch (e) {
+    console.warn(`${tag} 開 folder 失敗: ${e.message}`);
+    result.warnings.push(`folder access: ${e.message}`);
+    return result;
+  }
+  const files = folder.getFiles();
+  let latest = null, latestTime = 0;
+  while (files.hasNext()) {
+    const f = files.next();
+    const name = f.getName().toLowerCase();
+    if (!name.endsWith('.csv') && !name.includes('snowball')) continue;
+    const t = f.getLastUpdated().getTime();
+    if (t > latestTime) { latestTime = t; latest = f; }
+  }
+  if (!latest) {
+    console.warn(`${tag} folder 內無 CSV`);
+    result.warnings.push('no CSV in folder');
+    return result;
+  }
+  console.log(`${tag} 📂 ${latest.getName()} (updated ${latest.getLastUpdated()})`);
+
+  // 2. 解析 CSV
+  let rows;
+  try { rows = Utilities.parseCsv(latest.getBlob().getDataAsString('UTF-8')); }
+  catch (e) {
+    console.warn(`${tag} CSV parse 失敗: ${e.message}`);
+    result.warnings.push(`csv parse: ${e.message}`);
+    return result;
+  }
+  if (rows.length < 2) {
+    result.warnings.push('csv empty');
+    return result;
+  }
+  const header = rows[0].map(h => String(h).trim());
+  const required = ['Event', 'Date', 'Symbol', 'Price', 'Quantity', 'Currency'];
+  const missing = required.filter(c => header.indexOf(c) < 0);
+  if (missing.length > 0) {
+    console.warn(`${tag} CSV 缺欄位: ${missing.join(',')}`);
+    result.warnings.push(`csv missing cols: ${missing.join(',')}`);
+    return result;
+  }
+  const cE = header.indexOf('Event'), cS = header.indexOf('Symbol'),
+        cP = header.indexOf('Price'), cQ = header.indexOf('Quantity'),
+        cC = header.indexOf('Currency');
+
+  // 3. 聚合 BUY/SELL
+  const positions = {};
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const event = String(r[cE] || '').trim().toUpperCase();
+    if (event !== 'BUY' && event !== 'SELL') continue;
+    const symbol = String(r[cS] || '').trim();
+    if (!symbol) continue;
+    const price = parseFloat(r[cP]);
+    const qty = parseFloat(r[cQ]);
+    if (!isFinite(price) || !isFinite(qty)) continue;
+    const currency = String(r[cC] || '').trim().toUpperCase();
+    if (!positions[symbol]) positions[symbol] = { buys: [], sells: [], currency: currency };
+    if (event === 'BUY') positions[symbol].buys.push({ price: price, qty: qty });
+    else positions[symbol].sells.push({ price: price, qty: qty });
+  }
+
+  // 4. 計算 net holdings
+  const holdings = [];
+  Object.keys(positions).forEach(sym => {
+    const p = positions[sym];
+    const buyQty = p.buys.reduce((s, b) => s + b.qty, 0);
+    const sellQty = p.sells.reduce((s, b) => s + b.qty, 0);
+    let netQty = buyQty - sellQty;
+    if (buyQty === 0 && netQty === 0) return;
+    if (netQty < 0) {
+      result.warnings.push(`${sym}: netQty<0 (${netQty}, CSV 缺早期 BUY)，clamp to 0`);
+      netQty = 0;
+    }
+    holdings.push({
+      symbol: sym,
+      currency: p.currency,
+      shares: Math.round(netQty * 1000) / 1000
+    });
+  });
+
+  // 5. 讀 portfolio_live、建 lookup
+  const ss = _openV6Sheet();
+  if (!ss) { result.warnings.push('MACRO_SHEET_ID not set'); return result; }
+  const sh = ss.getSheetByName('portfolio_live');
+  if (!sh) {
+    console.warn(`${tag} portfolio_live 不存在`);
+    result.warnings.push('portfolio_live missing');
+    return result;
+  }
+  const liveHdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const lIdx = {
+    ticker: liveHdr.indexOf('ticker'),
+    market: liveHdr.indexOf('market'),
+    shares: liveHdr.indexOf('shares'),
+    lock_status: liveHdr.indexOf('lock_status'),
+    note: liveHdr.indexOf('note')
+  };
+  if (lIdx.ticker < 0 || lIdx.shares < 0 || lIdx.lock_status < 0) {
+    result.warnings.push('portfolio_live header 不符');
+    return result;
+  }
+
+  const liveByKey = {};
+  if (sh.getLastRow() >= 2) {
+    const liveData = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+    liveData.forEach((row, i) => {
+      const t = String(row[lIdx.ticker] || '').trim();
+      if (!t) return;
+      const key = normalizeTicker(t);
+      if (!liveByKey[key]) liveByKey[key] = { tradeableRows: [], lockedSum: 0 };
+      const lockStatus = String(row[lIdx.lock_status] || '').trim();
+      const shares = Number(row[lIdx.shares] || 0);
+      if (lockStatus === 'locked') {
+        liveByKey[key].lockedSum += shares;
+      } else {
+        liveByKey[key].tradeableRows.push({
+          rowIdx: i + 2,        // 1-indexed + skip header
+          shares: shares,
+          note: String(row[lIdx.note] || '').trim()
+        });
+      }
+    });
+  }
+
+  // 6. 處理每個 holding
+  const tz = 'Asia/Taipei';
+  const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  const diffs = [];   // for dryRun log
+
+  holdings.forEach(h => {
+    const key = normalizeTicker(h.symbol);
+    const entry = liveByKey[key] || { tradeableRows: [], lockedSum: 0 };
+    const target = Math.max(0, h.shares - entry.lockedSum);
+
+    if (h.shares < entry.lockedSum) {
+      result.warnings.push(`${h.symbol}: CSV total ${h.shares} < locked sum ${entry.lockedSum}`);
+      result.skipped++;
+      return;
+    }
+
+    if (entry.tradeableRows.length === 0) {
+      // append new tradeable row
+      const market = currencyToMarket(h.currency);
+      const newRow = new Array(liveHdr.length).fill('');
+      newRow[lIdx.ticker] = h.symbol;
+      newRow[lIdx.market] = market;
+      newRow[lIdx.shares] = target;
+      newRow[lIdx.lock_status] = 'tradeable';
+      if (lIdx.note >= 0) newRow[lIdx.note] = `自動同步自 Snowball ${today}`;
+      diffs.push(`+ append ${h.symbol} ${market} shares=${target}`);
+      if (!dryRun) sh.appendRow(newRow);
+      result.added++;
+      return;
+    }
+
+    if (entry.tradeableRows.length > 1) {
+      result.warnings.push(`${h.symbol}: portfolio_live 有 ${entry.tradeableRows.length} 列 tradeable，無法自動 sync`);
+      result.skipped++;
+      return;
+    }
+
+    // 唯一 tradeable row → 更新 shares
+    const row = entry.tradeableRows[0];
+    if (row.shares === target) {
+      diffs.push(`= ${h.symbol} shares unchanged (${target})`);
+      return;
+    }
+    diffs.push(`✏ ${h.symbol} ${row.shares} → ${target}`);
+    if (!dryRun) {
+      sh.getRange(row.rowIdx, lIdx.shares + 1).setValue(target);
+      // note: 只在原 note 為空或已是自動同步 stamp 時覆寫
+      if (lIdx.note >= 0 && (row.note === '' || row.note.indexOf('自動同步自 Snowball') === 0)) {
+        sh.getRange(row.rowIdx, lIdx.note + 1).setValue(`自動同步自 Snowball ${today}`);
+      }
+    }
+    result.updated++;
+  });
+
+  console.log(`${tag} 處理 ${holdings.length} 個 Symbol：updated=${result.updated} added=${result.added} skipped=${result.skipped} warnings=${result.warnings.length}`);
+  diffs.forEach(d => console.log(`  ${d}`));
+  result.warnings.forEach(w => console.warn(`  ⚠ ${w}`));
+  return result;
+}
+
+
+// ============================================================
 // Claude API cost calculator
 // ============================================================
 /**

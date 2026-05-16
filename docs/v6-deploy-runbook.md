@@ -122,12 +122,31 @@ D 欄 `enabled = TRUE` 的會載入 system prompt；FALSE 會被略過。
 選 setupV6Triggers → ▶ Run
 ```
 
-會裝 3 個 trigger：
+會裝 4 個 trigger：
+- `syncPortfolioLiveFromSnowball` @ 07:30 Asia/Taipei（讀最新 Snowball CSV 更新 portfolio_live tradeable 列）
 - `dailyPostMorning` @ 08:00 Asia/Taipei
 - `dailyPostEvening` @ 22:00 Asia/Taipei
 - `monitorUrgentTriggers` 每 30 分鐘
 
-確認：Apps Script → Triggers 應該看到 3 個新項目（或跑 `listV6Triggers`）。
+確認：Apps Script → Triggers 應該看到 4 個新項目（或跑 `listV6Triggers`）。
+
+### Snowball CSV 自動同步
+
+前提：
+- `SNOWBALL_FOLDER_ID` Script Property 已設（v5 既有，沿用同 folder）
+- Folder 內**只放最新一份 CSV**（舊的請刪掉或備份到子資料夾，sync 邏輯抓最新 LastUpdated）
+- CSV header 必含 `Event` / `Date` / `Symbol` / `Price` / `Quantity` / `Currency`
+
+行為：
+- 每天 07:30 自動跑（08:00 morning post 前）
+- CSV 推導淨持倉 → 減 portfolio_live locked 列 sum → 寫到 tradeable 列
+- **locked 列永不動**（信託 / 太太代持，請 Cross 自行維護）
+- 同 ticker 有 2+ tradeable 列 → log warning + skip
+- CSV 無但 portfolio_live 有的 ticker → 不動（容許 Snowball 外的部位）
+
+測試指令：
+- `v6DryRunSnowball()` — 預覽會改什麼，不寫 sheet
+- `v6TestSyncSnowball()` — 真實 sync 一次
 
 ---
 

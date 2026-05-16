@@ -189,7 +189,7 @@ function initV6MemorySheet() {
  * 重複執行此函式不會疊加：先清掉自己安裝過的同名 trigger。
  */
 function setupV6Triggers() {
-  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers'];
+  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers', 'syncPortfolioLiveFromSnowball'];
 
   // 清除 v6 既有 trigger（保留其他）
   ScriptApp.getProjectTriggers().forEach(t => {
@@ -224,12 +224,22 @@ function setupV6Triggers() {
     .create();
   console.log('✅ monitorUrgentTriggers @ every 30 min');
 
-  console.log('\n已安裝 3 個 v6 trigger，可至 Apps Script → Triggers 確認');
+  // snowball sync 07:30
+  ScriptApp.newTrigger('syncPortfolioLiveFromSnowball')
+    .timeBased()
+    .atHour(7)
+    .nearMinute(30)
+    .everyDays(1)
+    .inTimezone('Asia/Taipei')
+    .create();
+  console.log('✅ syncPortfolioLiveFromSnowball @ 07:30 Asia/Taipei');
+
+  console.log('\n已安裝 4 個 v6 trigger，可至 Apps Script → Triggers 確認');
 }
 
 
 function unsetupV6Triggers() {
-  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers'];
+  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers', 'syncPortfolioLiveFromSnowball'];
   let removed = 0;
   ScriptApp.getProjectTriggers().forEach(t => {
     if (v6Funcs.indexOf(t.getHandlerFunction()) >= 0) {
@@ -245,7 +255,7 @@ function unsetupV6Triggers() {
 // listV6Triggers — 列出當前 v6 trigger 狀態
 // ============================================================
 function listV6Triggers() {
-  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers'];
+  const v6Funcs = ['dailyPostMorning', 'dailyPostEvening', 'monitorUrgentTriggers', 'syncPortfolioLiveFromSnowball'];
   const all = ScriptApp.getProjectTriggers();
   console.log(`Project 共 ${all.length} 個 trigger：`);
   all.forEach(t => {
