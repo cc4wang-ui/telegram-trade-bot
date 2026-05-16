@@ -400,16 +400,17 @@ function syncPortfolioLiveFromSnowball(opts) {
     const p = positions[sym];
     const buyQty = p.buys.reduce((s, b) => s + b.qty, 0);
     const sellQty = p.sells.reduce((s, b) => s + b.qty, 0);
-    let netQty = buyQty - sellQty;
-    if (buyQty === 0 && netQty === 0) return;
-    if (netQty < 0) {
-      result.warnings.push(`${sym}: netQty<0 (${netQty}, CSV 缺早期 BUY)，clamp to 0`);
-      netQty = 0;
+    const rawNet = buyQty - sellQty;
+    if (buyQty === 0 && rawNet === 0) return;
+    const incomplete = rawNet < 0;   // CSV 缺早期 BUY → 不可信
+    if (incomplete) {
+      result.warnings.push(`${sym}: netQty<0 (${rawNet})，CSV 不完整 → 保留 portfolio_live 既有值`);
     }
     holdings.push({
       symbol: sym,
       currency: p.currency,
-      shares: Math.round(netQty * 1000) / 1000
+      shares: Math.round(Math.max(0, rawNet) * 1000) / 1000,
+      csvIncomplete: incomplete
     });
   });
 
@@ -463,6 +464,12 @@ function syncPortfolioLiveFromSnowball(opts) {
   const diffs = [];   // for dryRun log
 
   holdings.forEach(h => {
+    // CSV 不完整（早期 BUY 漏）→ 不寫，保留 portfolio_live 既有值
+    if (h.csvIncomplete) {
+      result.skipped++;
+      return;
+    }
+
     const key = normalizeTicker(h.symbol);
     const entry = liveByKey[key] || { tradeableRows: [], lockedSum: 0 };
     const target = Math.max(0, h.shares - entry.lockedSum);
