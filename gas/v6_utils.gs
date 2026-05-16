@@ -340,6 +340,14 @@ function parseSnowballSnapshot(text) {
     if (cShares < 0) missing.push('Shares');
     if (cCurrency < 0) missing.push('Currency');
     console.warn('[parseSnowball] 實際看到的 headers: ' + JSON.stringify(header.slice(0, 10)));
+    // 偵測「上傳錯檔」常見情境：transaction 格式 (Event/Symbol) 而非 snapshot
+    const isTxnFormat = header.indexOf('Event') >= 0 && header.indexOf('Symbol') >= 0;
+    if (isTxnFormat) {
+      return {
+        holdings: [],
+        error: '⚠ Drive 裡的 CSV 是 transaction 格式（Event/Symbol），不是 snapshot 格式。請從 Snowball 的 Holdings panel export，把檔上傳到 Drive folder 取代舊檔。'
+      };
+    }
     return { holdings: [], error: `csv missing cols: ${missing.join(',')}` };
   }
 
@@ -414,11 +422,14 @@ function syncPortfolioLiveFromSnowball(opts) {
   }
   const files = folder.getFiles();
   let latest = null, latestTime = 0;
+  const allCsvs = [];
   while (files.hasNext()) {
     const f = files.next();
-    const name = f.getName().toLowerCase();
-    if (!name.endsWith('.csv') && !name.includes('snowball')) continue;
+    const name = f.getName();
+    const lower = name.toLowerCase();
+    if (!lower.endsWith('.csv') && !lower.includes('snowball')) continue;
     const t = f.getLastUpdated().getTime();
+    allCsvs.push({ name: name, updated: f.getLastUpdated() });
     if (t > latestTime) { latestTime = t; latest = f; }
   }
   if (!latest) {
@@ -426,7 +437,9 @@ function syncPortfolioLiveFromSnowball(opts) {
     result.warnings.push('no CSV in folder');
     return result;
   }
-  console.log(`${tag} 📂 ${latest.getName()} (updated ${latest.getLastUpdated()})`);
+  console.log(`${tag} 📂 folder 內 CSV (${allCsvs.length} 個)：`);
+  allCsvs.forEach(c => console.log(`     ${c.updated.toISOString()}  ${c.name}`));
+  console.log(`${tag} → 選最新：${latest.getName()}`);
 
   // 2. 解析 snapshot
   const parsed = parseSnowballSnapshot(latest.getBlob().getDataAsString('UTF-8'));
