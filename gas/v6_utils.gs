@@ -372,22 +372,27 @@ function parseSnowballSnapshot(text) {
 
 
 // ============================================================
-// Snowball CSV → portfolio_live（tradeable 列）
+// Snowball CSV → portfolio_live（mirror）
 // ============================================================
 /**
- * 讀 Drive 內最新 Snowball CSV，更新 portfolio_live tradeable 列。
- * Locked 列由 Cross 手動維護，sync 永不動。
- * tradeable = CSV_net_total − Σ(locked rows shares)（CSV 含信託加總）
+ * 讀 Drive 內最新 Snowball Holdings snapshot CSV，
+ * 完全鏡射到 portfolio_live：1 ticker 一列，shares/market 來自 snapshot。
  *
- * Reuse v5 helpers: normalizeTicker / currencyToMarket（macro_snapshot_handler.gs）
+ * 保留 Cross 手動標的 lock_status + note（by normalizeTicker(ticker) lookup）。
+ * 重新寫入時 ticker 用 snapshot 原始格式（如 "00956"）。
+ *
+ * 行為：每次 sync 都清空 portfolio_live 資料列再重寫。如 Cross 把某 ticker
+ * 在原本 portfolio_live 標 locked，sync 後新列繼承該 lock_status。
+ * 如同 ticker 在原 portfolio_live 有多列衝突 lock_status，採保守原則：
+ * 任一列 locked → 新列 locked。Note 用第一個非空 note。
  *
  * @param {{dryRun?: boolean}} opts dryRun=true 只 log 不寫 sheet
- * @returns {{updated: number, added: number, skipped: number, warnings: string[]}}
+ * @returns {{written: number, preserved: number, warnings: string[]}}
  */
 function syncPortfolioLiveFromSnowball(opts) {
   const dryRun = !!(opts && opts.dryRun);
   const tag = dryRun ? '[snowball-dry]' : '[snowball-sync]';
-  const result = { updated: 0, added: 0, skipped: 0, warnings: [] };
+  const result = { written: 0, preserved: 0, warnings: [] };
 
   const props = PropertiesService.getScriptProperties();
   const folderId = props.getProperty('SNOWBALL_FOLDER_ID');
@@ -397,7 +402,7 @@ function syncPortfolioLiveFromSnowball(opts) {
     return result;
   }
 
-  // 1. 找 folder 最新 CSV（沿用 v5 邏輯）
+  // 1. 找 folder 最新 CSV
   let folder;
   try { folder = DriveApp.getFolderById(folderId); }
   catch (e) {
@@ -421,7 +426,7 @@ function syncPortfolioLiveFromSnowball(opts) {
   }
   console.log(`${tag} 📂 ${latest.getName()} (updated ${latest.getLastUpdated()})`);
 
-  // 2-4. 解析 snapshot CSV（共用 helper）
+  // 2. 解析 snapshot
   const parsed = parseSnowballSnapshot(latest.getBlob().getDataAsString('UTF-8'));
   if (parsed.error) {
     console.warn(`${tag} ${parsed.error}`);
@@ -429,8 +434,12 @@ function syncPortfolioLiveFromSnowball(opts) {
     return result;
   }
   const holdings = parsed.holdings;
+  if (holdings.length === 0) {
+    result.warnings.push('snapshot 無有效持倉');
+    return result;
+  }
 
-  // 5. 讀 portfolio_live、建 lookup
+  // 3. 開 portfolio_live
   const ss = _openV6Sheet();
   if (!ss) { result.warnings.push('MACRO_SHEET_ID not set'); return result; }
   const sh = ss.getSheetByName('portfolio_live');
@@ -447,101 +456,72 @@ function syncPortfolioLiveFromSnowball(opts) {
     lock_status: liveHdr.indexOf('lock_status'),
     note: liveHdr.indexOf('note')
   };
-  if (lIdx.ticker < 0 || lIdx.shares < 0 || lIdx.lock_status < 0) {
-    result.warnings.push('portfolio_live header 不符');
+  if (lIdx.ticker < 0 || lIdx.shares < 0) {
+    result.warnings.push('portfolio_live header 不符（需 ticker / shares）');
     return result;
   }
 
-  const liveByKey = {};
+  // 4. 保留現有 lock_status / note（by normalizeTicker key）
+  const preserve = {};   // key → { lock_status, note }
   if (sh.getLastRow() >= 2) {
     const liveData = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
-    liveData.forEach((row, i) => {
+    liveData.forEach(row => {
       const t = String(row[lIdx.ticker] || '').trim();
       if (!t) return;
       const key = normalizeTicker(t);
-      if (!liveByKey[key]) liveByKey[key] = { tradeableRows: [], lockedSum: 0 };
-      const lockStatus = String(row[lIdx.lock_status] || '').trim();
-      const shares = Number(row[lIdx.shares] || 0);
-      if (lockStatus === 'locked') {
-        liveByKey[key].lockedSum += shares;
-      } else {
-        liveByKey[key].tradeableRows.push({
-          rowIdx: i + 2,        // 1-indexed + skip header
-          shares: shares,
-          note: String(row[lIdx.note] || '').trim()
-        });
-      }
+      const lockStatus = (lIdx.lock_status >= 0) ? String(row[lIdx.lock_status] || '').trim() : '';
+      const note = (lIdx.note >= 0) ? String(row[lIdx.note] || '').trim() : '';
+      if (!preserve[key]) preserve[key] = { lock_status: '', note: '' };
+      // 保守：任一列 locked → 新列 locked
+      if (lockStatus === 'locked') preserve[key].lock_status = 'locked';
+      else if (!preserve[key].lock_status && lockStatus) preserve[key].lock_status = lockStatus;
+      // 第一個非空 note
+      if (!preserve[key].note && note) preserve[key].note = note;
     });
   }
 
-  // 6. 處理每個 holding
+  // 5. 組新列
   const tz = 'Asia/Taipei';
   const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
-  const diffs = [];   // for dryRun log
-
-  holdings.forEach(h => {
-    // CSV 不完整（早期 BUY 漏）→ 不寫，保留 portfolio_live 既有值
-    if (h.csvIncomplete) {
-      result.skipped++;
-      return;
-    }
-
+  const newRows = holdings.map(h => {
     const key = normalizeTicker(h.symbol);
-    const entry = liveByKey[key] || { tradeableRows: [], lockedSum: 0 };
-    const target = Math.max(0, h.shares - entry.lockedSum);
-
-    if (h.shares < entry.lockedSum) {
-      result.warnings.push(`${h.symbol}: CSV total ${h.shares} < locked sum ${entry.lockedSum}`);
-      result.skipped++;
-      return;
-    }
-
-    if (entry.tradeableRows.length === 0) {
-      // 全部 locked / CSV total 剛好 = locked sum → 不需要 tradeable 列
-      if (target === 0) {
-        diffs.push(`= ${h.symbol} all in locked (CSV ${h.shares} = locked ${entry.lockedSum})，無 tradeable 變化`);
-        return;
+    const p = preserve[key];
+    const row = new Array(liveHdr.length).fill('');
+    row[lIdx.ticker] = h.symbol;
+    if (lIdx.market >= 0) row[lIdx.market] = currencyToMarket(h.currency);
+    row[lIdx.shares] = h.shares;
+    if (lIdx.lock_status >= 0) row[lIdx.lock_status] = (p && p.lock_status) || 'tradeable';
+    if (lIdx.note >= 0) {
+      const preservedNote = (p && p.note) || '';
+      // 若原 note 是自動 stamp，覆寫成今天；否則保留 Cross 手寫
+      if (!preservedNote || preservedNote.indexOf('自動同步自 Snowball') === 0) {
+        row[lIdx.note] = `自動同步自 Snowball ${today}`;
+      } else {
+        row[lIdx.note] = preservedNote;
       }
-      // append new tradeable row
-      const market = currencyToMarket(h.currency);
-      const newRow = new Array(liveHdr.length).fill('');
-      newRow[lIdx.ticker] = h.symbol;
-      newRow[lIdx.market] = market;
-      newRow[lIdx.shares] = target;
-      newRow[lIdx.lock_status] = 'tradeable';
-      if (lIdx.note >= 0) newRow[lIdx.note] = `自動同步自 Snowball ${today}`;
-      diffs.push(`+ append ${h.symbol} ${market} shares=${target}`);
-      if (!dryRun) sh.appendRow(newRow);
-      result.added++;
-      return;
+      if (p && p.note && p.note.indexOf('自動同步自 Snowball') !== 0) result.preserved++;
     }
-
-    if (entry.tradeableRows.length > 1) {
-      result.warnings.push(`${h.symbol}: portfolio_live 有 ${entry.tradeableRows.length} 列 tradeable，無法自動 sync`);
-      result.skipped++;
-      return;
-    }
-
-    // 唯一 tradeable row → 更新 shares
-    const row = entry.tradeableRows[0];
-    if (row.shares === target) {
-      diffs.push(`= ${h.symbol} shares unchanged (${target})`);
-      return;
-    }
-    diffs.push(`✏ ${h.symbol} ${row.shares} → ${target}`);
-    if (!dryRun) {
-      sh.getRange(row.rowIdx, lIdx.shares + 1).setValue(target);
-      // note: 只在原 note 為空或已是自動同步 stamp 時覆寫
-      if (lIdx.note >= 0 && (row.note === '' || row.note.indexOf('自動同步自 Snowball') === 0)) {
-        sh.getRange(row.rowIdx, lIdx.note + 1).setValue(`自動同步自 Snowball ${today}`);
-      }
-    }
-    result.updated++;
+    return row;
   });
 
-  console.log(`${tag} 處理 ${holdings.length} 個 Symbol：updated=${result.updated} added=${result.added} skipped=${result.skipped} warnings=${result.warnings.length}`);
-  diffs.forEach(d => console.log(`  ${d}`));
-  result.warnings.forEach(w => console.warn(`  ⚠ ${w}`));
+  // 6. log preview / write
+  newRows.forEach((r, i) => {
+    const h = holdings[i];
+    const lockStr = (lIdx.lock_status >= 0) ? ` [${r[lIdx.lock_status]}]` : '';
+    console.log(`  ${h.symbol} ${h.shares} ${h.currency}${lockStr}`);
+  });
+  console.log(`${tag} 共 ${newRows.length} 列；保留 lock/note: ${result.preserved}`);
+
+  if (dryRun) return result;
+
+  // 7. 清空舊資料列、寫入新列
+  if (sh.getLastRow() >= 2) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
+  }
+  sh.getRange(2, 1, newRows.length, liveHdr.length).setValues(newRows);
+  result.written = newRows.length;
+  console.log(`${tag} ✅ portfolio_live 已重寫 ${newRows.length} 列`);
+
   return result;
 }
 

@@ -71,10 +71,12 @@ function setupV6Check() {
 
   console.log('\n下一步：');
   console.log('  1. initV6MemorySheet() 預填 18 條 memory（Cross 自行補內容）');
-  console.log('  2. initV6PortfolioLive() 預填當前持倉（Cross 自行確認）');
-  console.log('  3. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
-  console.log('  4. v6TestMorning() 手動跑一次 morning post');
-  console.log('  5. setupV6Triggers() 上線 cron');
+  console.log('  2. v6TestSyncSnowball() 從 Drive snapshot CSV 同步 portfolio_live');
+  console.log('     (Mirror 模式：每次 sync 全部重寫，保留 lock_status/note 標註)');
+  console.log('  3. 開 sheet 把信託部位 lock_status 改 locked（一次性，之後 sync 會保留）');
+  console.log('  4. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
+  console.log('  5. v6TestMorning() 手動跑一次 morning post');
+  console.log('  6. setupV6Triggers() 上線 cron');
 }
 
 

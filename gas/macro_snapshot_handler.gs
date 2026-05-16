@@ -2100,21 +2100,18 @@ function syncFromSnowball() {
     }
   }
 
-  // 6. snapshot 缺的 ticker → watchlist 標 exit（snapshot 無 = 已出清）
-  let autoExited = 0;
+  // 6. snapshot 缺的 ticker → 只警告，不自動標 exit（由 Cross 手動決定）
+  let warnedMissing = 0;
   for (let i = 1; i < data.length; i++) {
     const t = String(data[i][wT] || '').trim();
     if (!t) continue;
     if (inSnapshot[normalizeTicker(t)]) continue;
     const curShares = parseFloat(data[i][wS]);
     const curExit = String(data[i][wE] || '').trim();
-    if (isFinite(curShares) && curShares > 0) {
-      sh.getRange(i + 1, wS + 1).setValue(0);
-    }
-    if (!curExit) {
-      sh.getRange(i + 1, wE + 1).setValue(today);
-      autoExited++;
-      console.log('  ⛔ ' + t + ' → snapshot 無，標 exit ' + today);
+    // 只警告現役（shares>0 + 未標 exit）的 ticker
+    if (isFinite(curShares) && curShares > 0 && !curExit) {
+      console.log('  ⚠ ' + t + ' shares=' + curShares + ' 但 snapshot 無 → 請 Cross 手動確認');
+      warnedMissing++;
     }
   }
 
@@ -2123,7 +2120,7 @@ function syncFromSnowball() {
   console.log('   檔案: ' + latestFile.getName());
   console.log('   更新: ' + updated + ' 檔');
   console.log('   新增: ' + added + ' 檔');
-  console.log('   自動標 exit: ' + autoExited + ' 檔');
+  console.log('   警告（snapshot 缺）: ' + warnedMissing + ' 檔');
 }
 
 function normalizeTicker(s) {
