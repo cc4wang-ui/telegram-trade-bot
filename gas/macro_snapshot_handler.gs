@@ -2023,25 +2023,65 @@ function syncFromSnowball() {
   console.log('📂 抓到檔案: ' + latestFile.getName());
   console.log('   修改時間: ' + latestFile.getLastUpdated());
 
-  // 2-4. 解析 snapshot CSV（共用 parseSnowballSnapshot from v6_utils.gs）
+  // 2. 解析 CSV
   const csv = latestFile.getBlob().getDataAsString('UTF-8');
-  const parsed = parseSnowballSnapshot(csv);
-  if (parsed.error) throw new Error('CSV parse 失敗: ' + parsed.error);
-  console.log('   解析完成: ' + parsed.holdings.length + ' 個 Symbol（snapshot 格式）');
+  const rows = Utilities.parseCsv(csv);
+  if (rows.length < 2) throw new Error('CSV 是空的或只有 header');
 
-  // snapshot 不含已 exited，需在 step 5 用「watchlist 有但 snapshot 無」推 exit
-  const today = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd');
-  const inSnapshot = {};   // normalizeTicker → true
-  const holdings = parsed.holdings.map(h => {
-    inSnapshot[normalizeTicker(h.symbol)] = true;
-    return {
-      symbol: h.symbol,
-      currency: h.currency,
-      shares: h.shares,
-      avg_cost: (h.avgCost != null) ? h.avgCost : 0,
-      exit_at: ''
-    };
-  });
+  const header = rows[0].map(h => String(h).trim());
+  const colIdx = (name) => {
+    const i = header.indexOf(name);
+    if (i < 0) throw new Error('CSV 缺欄位: ' + name + '（header=' + header.join(',') + '）');
+    return i;
+  };
+  const cE = colIdx('Event'), cD = colIdx('Date'), cS = colIdx('Symbol'),
+        cP = colIdx('Price'), cQ = colIdx('Quantity'), cC = colIdx('Currency');
+
+  // 3. 加總 BUY/SELL by Symbol
+  const positions = {};  // symbol → { buys: [], sells: [], currency }
+  let skippedRows = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const event = String(r[cE] || '').trim().toUpperCase();
+    if (event !== 'BUY' && event !== 'SELL') { skippedRows++; continue; }
+
+    const symbol = String(r[cS] || '').trim();
+    if (!symbol) continue;
+    const price = parseFloat(r[cP]);
+    const qty = parseFloat(r[cQ]);
+    if (!isFinite(price) || !isFinite(qty)) continue;
+
+    const date = String(r[cD] || '').split(' ')[0];  // strip "0:00:00" 部分
+    const currency = String(r[cC] || '').trim().toUpperCase();
+
+    if (!positions[symbol]) positions[symbol] = { buys: [], sells: [], currency: currency };
+    if (event === 'BUY')  positions[symbol].buys.push({ price: price, qty: qty, date: date });
+    else                  positions[symbol].sells.push({ price: price, qty: qty, date: date });
+  }
+  console.log('   解析完成: ' + Object.keys(positions).length + ' 個 Symbol，跳過 ' + skippedRows + ' 列（CASH_IN/DIVIDEND 等）');
+
+  // 4. 計算當前持倉
+  const holdings = [];
+  for (const sym in positions) {
+    const p = positions[sym];
+    const buyQty  = p.buys.reduce((s, b) => s + b.qty, 0);
+    const sellQty = p.sells.reduce((s, b) => s + b.qty, 0);
+    const netQty  = buyQty - sellQty;
+    if (buyQty === 0) continue;
+
+    const avgCost = p.buys.reduce((s, b) => s + b.price * b.qty, 0) / buyQty;
+    const lastSellDate = p.sells.length
+      ? p.sells.map(b => b.date).sort().pop()
+      : '';
+
+    holdings.push({
+      symbol: sym,
+      currency: p.currency,
+      shares: Math.round(netQty * 1000) / 1000,
+      avg_cost: Math.round(avgCost * 100) / 100,
+      exit_at: netQty > 0.0001 ? '' : lastSellDate,
+    });
+  }
 
   // 5. 更新 earnings_watchlist
   const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -2100,27 +2140,12 @@ function syncFromSnowball() {
     }
   }
 
-  // 6. snapshot 缺的 ticker → 只警告，不自動標 exit（由 Cross 手動決定）
-  let warnedMissing = 0;
-  for (let i = 1; i < data.length; i++) {
-    const t = String(data[i][wT] || '').trim();
-    if (!t) continue;
-    if (inSnapshot[normalizeTicker(t)]) continue;
-    const curShares = parseFloat(data[i][wS]);
-    const curExit = String(data[i][wE] || '').trim();
-    // 只警告現役（shares>0 + 未標 exit）的 ticker
-    if (isFinite(curShares) && curShares > 0 && !curExit) {
-      console.log('  ⚠ ' + t + ' shares=' + curShares + ' 但 snapshot 無 → 請 Cross 手動確認');
-      warnedMissing++;
-    }
-  }
-
   console.log('');
   console.log('✅ Snowball sync 完成');
   console.log('   檔案: ' + latestFile.getName());
   console.log('   更新: ' + updated + ' 檔');
   console.log('   新增: ' + added + ' 檔');
-  console.log('   警告（snapshot 缺）: ' + warnedMissing + ' 檔');
+  console.log('   標記 exit: ' + exited + ' 檔');
 }
 
 function normalizeTicker(s) {
