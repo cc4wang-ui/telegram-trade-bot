@@ -304,6 +304,74 @@ function syncPortfolioToMemory() {
 
 
 // ============================================================
+// Snowball snapshot CSV parser（共用 v5 / v6）
+// ============================================================
+/**
+ * 解析 Snowball Holdings snapshot CSV（一行一個 holding）。
+ * 必要欄位：Holding (ticker)、Shares、Currency。可選：Cost per share。
+ * 自動偵測 comma / tab 分隔。
+ * 同 ticker 多列 → 累加 shares（CSV 跨 portfolio 加總）。
+ *
+ * @param {string} text - CSV 原文
+ * @returns {{holdings: Array, error: string|null}}
+ *   holdings: [{symbol, currency, shares, avgCost}]
+ */
+function parseSnowballSnapshot(text) {
+  let rows;
+  try {
+    rows = Utilities.parseCsv(text);
+    if (rows.length > 0 && rows[0].length < 3 && text.indexOf('\t') >= 0) {
+      rows = Utilities.parseCsv(text, '\t');
+    }
+  } catch (e) {
+    return { holdings: [], error: `csv parse: ${e.message}` };
+  }
+  if (rows.length < 2) return { holdings: [], error: 'csv empty' };
+
+  const header = rows[0].map(h => String(h).trim());
+  const cTicker = header.indexOf('Holding');
+  const cShares = header.indexOf('Shares');
+  const cCurrency = header.indexOf('Currency');
+  const cCost = header.indexOf('Cost per share');
+  if (cTicker < 0 || cShares < 0 || cCurrency < 0) {
+    const missing = [];
+    if (cTicker < 0) missing.push('Holding');
+    if (cShares < 0) missing.push('Shares');
+    if (cCurrency < 0) missing.push('Currency');
+    return { holdings: [], error: `csv missing cols: ${missing.join(',')}` };
+  }
+
+  const snapshot = {};
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const ticker = String(r[cTicker] || '').trim();
+    if (!ticker) continue;
+    const shares = parseFloat(String(r[cShares] || '').replace(/,/g, ''));
+    if (!isFinite(shares) || shares <= 0) continue;
+    const currency = String(r[cCurrency] || '').trim().toUpperCase();
+    const avgCost = (cCost >= 0) ? parseFloat(String(r[cCost] || '').replace(/,/g, '')) : NaN;
+    if (!snapshot[ticker]) snapshot[ticker] = { shares: 0, currency: currency, costSum: 0, costQty: 0 };
+    snapshot[ticker].shares += shares;
+    if (isFinite(avgCost)) {
+      snapshot[ticker].costSum += avgCost * shares;
+      snapshot[ticker].costQty += shares;
+    }
+  }
+
+  const holdings = Object.keys(snapshot).map(sym => {
+    const s = snapshot[sym];
+    return {
+      symbol: sym,
+      currency: s.currency,
+      shares: Math.round(s.shares * 1000) / 1000,
+      avgCost: (s.costQty > 0) ? Math.round((s.costSum / s.costQty) * 100) / 100 : null
+    };
+  });
+  return { holdings: holdings, error: null };
+}
+
+
+// ============================================================
 // Snowball CSV → portfolio_live（tradeable 列）
 // ============================================================
 /**
@@ -353,66 +421,14 @@ function syncPortfolioLiveFromSnowball(opts) {
   }
   console.log(`${tag} 📂 ${latest.getName()} (updated ${latest.getLastUpdated()})`);
 
-  // 2. 解析 CSV
-  let rows;
-  try { rows = Utilities.parseCsv(latest.getBlob().getDataAsString('UTF-8')); }
-  catch (e) {
-    console.warn(`${tag} CSV parse 失敗: ${e.message}`);
-    result.warnings.push(`csv parse: ${e.message}`);
+  // 2-4. 解析 snapshot CSV（共用 helper）
+  const parsed = parseSnowballSnapshot(latest.getBlob().getDataAsString('UTF-8'));
+  if (parsed.error) {
+    console.warn(`${tag} ${parsed.error}`);
+    result.warnings.push(parsed.error);
     return result;
   }
-  if (rows.length < 2) {
-    result.warnings.push('csv empty');
-    return result;
-  }
-  const header = rows[0].map(h => String(h).trim());
-  const required = ['Event', 'Date', 'Symbol', 'Price', 'Quantity', 'Currency'];
-  const missing = required.filter(c => header.indexOf(c) < 0);
-  if (missing.length > 0) {
-    console.warn(`${tag} CSV 缺欄位: ${missing.join(',')}`);
-    result.warnings.push(`csv missing cols: ${missing.join(',')}`);
-    return result;
-  }
-  const cE = header.indexOf('Event'), cS = header.indexOf('Symbol'),
-        cP = header.indexOf('Price'), cQ = header.indexOf('Quantity'),
-        cC = header.indexOf('Currency');
-
-  // 3. 聚合 BUY/SELL
-  const positions = {};
-  for (let i = 1; i < rows.length; i++) {
-    const r = rows[i];
-    const event = String(r[cE] || '').trim().toUpperCase();
-    if (event !== 'BUY' && event !== 'SELL') continue;
-    const symbol = String(r[cS] || '').trim();
-    if (!symbol) continue;
-    const price = parseFloat(r[cP]);
-    const qty = parseFloat(r[cQ]);
-    if (!isFinite(price) || !isFinite(qty)) continue;
-    const currency = String(r[cC] || '').trim().toUpperCase();
-    if (!positions[symbol]) positions[symbol] = { buys: [], sells: [], currency: currency };
-    if (event === 'BUY') positions[symbol].buys.push({ price: price, qty: qty });
-    else positions[symbol].sells.push({ price: price, qty: qty });
-  }
-
-  // 4. 計算 net holdings
-  const holdings = [];
-  Object.keys(positions).forEach(sym => {
-    const p = positions[sym];
-    const buyQty = p.buys.reduce((s, b) => s + b.qty, 0);
-    const sellQty = p.sells.reduce((s, b) => s + b.qty, 0);
-    const rawNet = buyQty - sellQty;
-    if (buyQty === 0 && rawNet === 0) return;
-    const incomplete = rawNet < 0;   // CSV 缺早期 BUY → 不可信
-    if (incomplete) {
-      result.warnings.push(`${sym}: netQty<0 (${rawNet})，CSV 不完整 → 保留 portfolio_live 既有值`);
-    }
-    holdings.push({
-      symbol: sym,
-      currency: p.currency,
-      shares: Math.round(Math.max(0, rawNet) * 1000) / 1000,
-      csvIncomplete: incomplete
-    });
-  });
+  const holdings = parsed.holdings;
 
   // 5. 讀 portfolio_live、建 lookup
   const ss = _openV6Sheet();
