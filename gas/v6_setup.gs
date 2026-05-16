@@ -69,68 +69,126 @@ function setupV6Check() {
     }
   });
 
+  // 自動初始化 portfolio_live 的 locked + manual rows（冪等）
+  console.log('');
+  console.log('初始化 portfolio_live 基礎列（locked + manual）...');
+  try { initV6PortfolioLiveBase(); }
+  catch (e) { console.warn('  ⚠ ' + e.message); }
+
   console.log('\n下一步：');
   console.log('  1. initV6MemorySheet() 預填 18 條 memory（Cross 自行補內容）');
-  console.log('  2. v6TestSyncSnowball() 從 Drive snapshot CSV 同步 portfolio_live');
-  console.log('     (Mirror 模式：每次 sync 全部重寫，保留 lock_status/note 標註)');
-  console.log('  3. 開 sheet 把信託部位 lock_status 改 locked（一次性，之後 sync 會保留）');
-  console.log('  4. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
-  console.log('  5. v6TestMorning() 手動跑一次 morning post');
-  console.log('  6. setupV6Triggers() 上線 cron');
+  console.log('  2. v6TestSyncSnowball() 從 Snowball CSV 自動補 tradeable 列');
+  console.log('  3. v6TestFetchData() 確認 FRED/Yahoo 抓得到');
+  console.log('  4. v6TestMorning() 手動跑一次 morning post');
+  console.log('  5. setupV6Triggers() 上線 cron（含 07:30 自動 sync）');
 }
 
 
 // ============================================================
-// initV6PortfolioLive — 預填當前持倉（Cross 在 sheet 編輯）
+// v6 Cross-specific portfolio config（hard-coded，避免手動編輯 sheet）
+// 變更步驟：改下面 array → 重貼 v6_setup.gs → 跑 resetV6PortfolioLiveBase()
 // ============================================================
 /**
- * 預填 16 列當前持倉到 portfolio_live sheet（從 spec + Cross 確認的真實資料）。
- * Cross 之後在 sheet 直接編輯這幾列，賣就改 shares=0、新買新增列。
- * v6 syncPortfolioToMemory() 會讀此 sheet 自動寫到 Memory #3。
+ * 信託（locked）部位 — Snowball CSV 看到的 total 會包含這些，但屬於不能動的倉位。
+ * Sync 時用 snapshot_total − locked_sum 推導 tradeable。
  */
-function initV6PortfolioLive() {
+const V6_LOCKED_POSITIONS = [
+  { ticker: '2330',   market: 'TW', shares: 920,   note: '信託 / 台積電' },
+  { ticker: '2382',   market: 'TW', shares: 2188,  note: '信託 / 廣達' },
+  { ticker: '00956',  market: 'TW', shares: 4308,  note: '信託 / CTBC TOPIX' },
+  { ticker: '006208', market: 'TW', shares: 3545,  note: '信託 / 富邦台 50' },
+  { ticker: 'QQQ',    market: 'US', shares: 28,    note: '信託' }
+];
+
+/**
+ * Snowball CSV 沒同步到、但 Cross 持有的 tradeable 部位（手動加進 portfolio_live）。
+ */
+const V6_MANUAL_TRADEABLE = [
+  { ticker: '00632R', market: 'TW', shares: 15000, note: '元大反一對沖 / 不在 Snowball' }
+];
+
+
+// ============================================================
+// initV6PortfolioLiveBase — 寫入 locked + manual tradeable 基礎列
+// ============================================================
+/**
+ * 把 V6_LOCKED_POSITIONS + V6_MANUAL_TRADEABLE 寫進 portfolio_live。
+ * 如 portfolio_live 已有對應 ticker 列，**不重複寫**（冪等）。
+ * 若 portfolio_live 完全空 → 寫入 6 列基礎；之後 sync 自動補 tradeable。
+ */
+function initV6PortfolioLiveBase() {
   const ss = _openV6Sheet();
   if (!ss) throw new Error('MACRO_SHEET_ID not set');
   const sh = ss.getSheetByName('portfolio_live');
-  if (!sh) throw new Error('portfolio_live sheet 不存在 → 先跑 setupV6Check()');
+  if (!sh) throw new Error('portfolio_live 不存在 → 先跑 setupV6Check()');
 
-  if (sh.getLastRow() >= 2) {
-    console.log(`ℹ portfolio_live 已有 ${sh.getLastRow() - 1} 列資料 → 略過初始化`);
-    return;
+  const hdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = {
+    ticker: hdr.indexOf('ticker'),
+    market: hdr.indexOf('market'),
+    shares: hdr.indexOf('shares'),
+    lock_status: hdr.indexOf('lock_status'),
+    note: hdr.indexOf('note')
+  };
+  if (idx.ticker < 0 || idx.shares < 0 || idx.lock_status < 0) {
+    throw new Error('portfolio_live header 不符（需 ticker / shares / lock_status）');
   }
 
-  // 欄位: ticker | market | shares | lock_status | note
-  const seed = [
-    // 自由 Firstrade（個人美股 91275762）
-    ['NVDA',   'US',    15, 'tradeable', 'Firstrade'],
-    ['NFLX',   'US',    50, 'tradeable', 'Firstrade / 5/3 賣 50 剩 50'],
-    ['QQQ',    'US',    10, 'tradeable', 'Firstrade'],
-    ['VTI',    'US',    10, 'tradeable', 'Firstrade'],
-    ['INTC',   'US',    25, 'tradeable', 'Firstrade / 新建倉'],
-    // 元大美股
-    ['VOO',    'US',    18, 'tradeable', '元大美股'],
-    ['IXC',    'US',    60, 'tradeable', '元大美股 / 能源對沖'],
-    // 元大港股
-    ['9660',   'HK', 16800, 'tradeable', '元大港股 / 地平線機器人'],
-    // 元大台股
-    ['2330',   'TW',  1018, 'tradeable', '元大台股 / 台積電'],
-    ['006208', 'TW',    34, 'tradeable', '元大台股 / 富邦台 50 零頭'],
-    ['00632R', 'TW', 15000, 'tradeable', '元大台股 / 反一對沖'],
-    // 信託（鎖倉不能動）
-    ['2330',   'TW',   910, 'locked',    '信託 / 台積電'],
-    ['006208', 'TW',  3500, 'locked',    '信託 / 富邦台 50'],
-    ['QQQ',    'US',    28, 'locked',    '信託'],
-    ['2382',   'TW',  2188, 'locked',    '信託 / 廣達'],
-    ['00956',  'TW',  4308, 'locked',    '信託 / CTBC TOPIX']
-  ];
-  seed.forEach(row => sh.appendRow(row));
-  console.log(`✅ 預填 ${seed.length} 列 portfolio_live`);
-  console.log('  Cross 請至 sheet 確認數字是否正確：');
-  console.log('  - NFLX 50（5/3 後剩餘）');
-  console.log('  - 00632R 15000（反一對沖仍持有）');
-  console.log('  - INTC 25（新建倉日期請確認）');
-  console.log('  - QQQ 拆 10 自由 + 28 信託');
-  console.log('  - 2330 拆 1018 自由 + 910 信託');
+  // 既有列：key = normalizeTicker(ticker) + '@' + lock_status
+  const exists = {};
+  if (sh.getLastRow() >= 2) {
+    const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+    data.forEach(row => {
+      const t = String(row[idx.ticker] || '').trim();
+      if (!t) return;
+      const lock = String(row[idx.lock_status] || '').trim();
+      exists[normalizeTicker(t) + '@' + lock] = true;
+    });
+  }
+
+  let added = 0;
+  const _append = (entry, lockStatus) => {
+    const key = normalizeTicker(entry.ticker) + '@' + lockStatus;
+    if (exists[key]) {
+      console.log(`  = 已存在 ${entry.ticker} [${lockStatus}]`);
+      return;
+    }
+    const row = new Array(hdr.length).fill('');
+    row[idx.ticker] = entry.ticker;
+    if (idx.market >= 0) row[idx.market] = entry.market;
+    row[idx.shares] = entry.shares;
+    row[idx.lock_status] = lockStatus;
+    if (idx.note >= 0) row[idx.note] = entry.note || '';
+    sh.appendRow(row);
+    console.log(`  + ${entry.ticker} ${entry.shares} [${lockStatus}] ${entry.note || ''}`);
+    added++;
+  };
+
+  V6_LOCKED_POSITIONS.forEach(p => _append(p, 'locked'));
+  V6_MANUAL_TRADEABLE.forEach(p => _append(p, 'tradeable'));
+
+  console.log(`✅ 基礎列初始化完成：新增 ${added} 列（locked=${V6_LOCKED_POSITIONS.length}, manual tradeable=${V6_MANUAL_TRADEABLE.length}）`);
+  if (added === 0) console.log('  所有基礎列已存在，無變動');
+  console.log('  下一步：跑 v6TestSyncSnowball() 從 Snowball CSV 補 tradeable 列');
+}
+
+
+/**
+ * 完整重置 portfolio_live：清空 → 寫入 base → sync tradeable。
+ * 用於信託規則變更後一次性重建。
+ */
+function resetV6PortfolioLiveBase() {
+  const ss = _openV6Sheet();
+  if (!ss) throw new Error('MACRO_SHEET_ID not set');
+  const sh = ss.getSheetByName('portfolio_live');
+  if (!sh) throw new Error('portfolio_live 不存在 → 先跑 setupV6Check()');
+  if (sh.getLastRow() >= 2) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).clearContent();
+    console.log(`  清空 portfolio_live 原資料列`);
+  }
+  initV6PortfolioLiveBase();
+  console.log('  接下來會自動跑 syncPortfolioLiveFromSnowball...');
+  syncPortfolioLiveFromSnowball();
 }
 
 
